@@ -48,12 +48,12 @@ var wg sync.WaitGroup
 var tasks chan func()
 
 func createTask(task func()) {
+	wg.Add(1)
 	tasks <- task
 }
 
 func startWorker() {
 	for task := range tasks {
-		wg.Add(1)
 		task()
 		wg.Done()
 	}
@@ -77,7 +77,6 @@ func initWorkerPool(threadLimit int, taskBufferLength int) {
 }
 
 func syncWorkerPool() {
-	time.Sleep(1 * time.Millisecond)
 	wg.Wait()
 	close(tasks)
 }
