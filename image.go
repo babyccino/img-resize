@@ -23,7 +23,13 @@ func getFileExtension(fileName string) (string, string, error) {
 	return fileName[lastPeriod:], fileName[:lastPeriod], nil
 }
 
-func resizeToWidth(img *bimg.Image, width int) ([]byte, error) {
+func resizeToWidth(img *bimg.Image, width int, outDir string, name string) {
+	fmt.Println("Resizing " + name + " to " + fmt.Sprint(width) + "w")
+	if img == nil {
+		fmt.Fprintln(os.Stderr, "newImage is nil")
+		return
+	}
+
 	size, err := img.Size()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -31,7 +37,17 @@ func resizeToWidth(img *bimg.Image, width int) ([]byte, error) {
 
 	height := (width * size.Height) / size.Width
 
-	return img.Resize(width, height)
+	buf, err := img.Resize(width, height)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+
+	err = bimg.Write(outDir+name+"/"+fmt.Sprint(width)+"w:"+name+".webp", buf)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
 }
 
 func getStartingIndex(width int, sizes []int) int {
@@ -105,23 +121,7 @@ func makeResizeImageTask(buffer []byte, fileNameNoExt string, sizes []int, ch ch
 	fmt.Println("Resizing " + fileNameNoExt + " to " + fmt.Sprint(sizes[startingIndex:]))
 	for _, resizeWidth := range sizes[startingIndex:] {
 		resizeWidthCopy := resizeWidth
-		createTask(func() {
-			fmt.Println("Resizing " + fileNameNoExt + " to " + fmt.Sprint(resizeWidthCopy) + "w")
-			if newImage == nil {
-				fmt.Fprintln(os.Stderr, "newImage is nil")
-				return
-			}
-
-			buf, err := resizeToWidth(newImage, resizeWidthCopy)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			}
-
-			err = bimg.Write(outDir+fileNameNoExt+"/"+fmt.Sprint(resizeWidthCopy)+"w:"+fileNameNoExt+".webp", buf)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			}
-		})
+		createTask(func() { resizeToWidth(newImage, resizeWidthCopy, outDir, fileNameNoExt) })
 	}
 
 	return nil
