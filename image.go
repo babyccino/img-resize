@@ -15,7 +15,7 @@ import (
 	"github.com/h2non/bimg"
 )
 
-func getFileExtension(fileName string) (string, string, error) {
+func getFileExtension(fileName string) (extension string, fileNameNoExt string, err error) {
 	lastPeriod := strings.LastIndex(fileName, ".")
 	if lastPeriod == -1 {
 		return "", "", fmt.Errorf("No extension found")
@@ -43,7 +43,7 @@ func resizeToWidth(img *bimg.Image, width int, outDir string, name string) {
 		return
 	}
 
-	err = bimg.Write(outDir+name+"/"+fmt.Sprint(width)+"w:"+name+".webp", buf)
+	err = bimg.Write(outDir+name+"/"+name+"?w="+fmt.Sprint(width)+".webp", buf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -98,7 +98,7 @@ func syncWorkerPool() {
 }
 
 func makeResizeImageTask(fileName string, sizes []int, outDir string) {
-	_, fileNameNoExt, err := getFileExtension(fileName)
+	extension, fileNameNoExt, err := getFileExtension(fileName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -122,6 +122,15 @@ func makeResizeImageTask(fileName string, sizes []int, outDir string) {
 	if dirErr != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
+	}
+
+	// create full size webp image if the original image is not webp
+	if extension != ".webp" {
+		err = bimg.Write(outDir+fileNameNoExt+"/"+fileNameNoExt+".webp", newImageBuf)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
 	}
 
 	size, err := newImage.Size()
