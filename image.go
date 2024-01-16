@@ -97,11 +97,23 @@ func syncWorkerPool() {
 	close(tasks)
 }
 
-func makeResizeImageTask(buffer []byte, fileNameNoExt string, sizes []int, ch chan func(), outDir string) error {
+func makeResizeImageTask(fileName string, sizes []int, outDir string) {
+	_, fileNameNoExt, err := getFileExtension(fileName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+
+	buffer, err := bimg.Read(fileName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+
 	newImageBuf, err := bimg.NewImage(buffer).Convert(bimg.WEBP)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return err
+		return
 	}
 
 	newImage := bimg.NewImage(newImageBuf)
@@ -109,12 +121,13 @@ func makeResizeImageTask(buffer []byte, fileNameNoExt string, sizes []int, ch ch
 	dirErr := os.MkdirAll(outDir+fileNameNoExt, 0755)
 	if dirErr != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return err
+		return
 	}
 
 	size, err := newImage.Size()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		return
 	}
 
 	startingIndex := getStartingIndex(size.Width, sizes)
@@ -123,21 +136,19 @@ func makeResizeImageTask(buffer []byte, fileNameNoExt string, sizes []int, ch ch
 		resizeWidthCopy := resizeWidth
 		createTask(func() { resizeToWidth(newImage, resizeWidthCopy, outDir, fileNameNoExt) })
 	}
-
-	return nil
 }
 
-func getArgs() ([]int, string) {
+func getArgs() (sizes []int, outDir string, inputDir string) {
 	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to")
 	outDirFlag := flag.String("outDir", "", "output directory")
+	inputDirFlag := flag.String("inputDir", "", "input directory")
 	flag.Parse()
 
-	var outDir string
 	if outDirFlag == nil || len(*outDirFlag) == 0 {
 		outDir = "./"
 	} else {
 		outDir = *outDirFlag
-		if outDir[0] != '/' && outDir[0] != '.' {
+		if outDir[0] != '/' && outDir[0] != '.' && outDir[0] != '~' {
 			outDir = "./" + outDir
 		}
 		if outDir[len(outDir)-1] != '/' {
@@ -145,38 +156,51 @@ func getArgs() ([]int, string) {
 		}
 	}
 
-	if sizeFlag == nil || len(*sizeFlag) == 0 {
-		fmt.Println("No size flag provided, using default values")
-		return []int{1400, 1200, 800, 400}, outDir
+	if inputDirFlag == nil || len(*inputDirFlag) == 0 {
+		inputDir = "./"
+	} else {
+		inputDir = *inputDirFlag
+		if inputDir[0] != '/' && inputDir[0] != '.' && inputDir[0] != '~' {
+			inputDir = "./" + inputDir
+		}
+		if inputDir[len(inputDir)-1] != '/' {
+			inputDir += "/"
+		}
 	}
 
-	var sizes []int
+	if sizeFlag == nil || len(*sizeFlag) == 0 {
+		fmt.Println("No size flag provided, using default values")
+		sizes = []int{1400, 1200, 800, 400}
+		return sizes, outDir, inputDir
+	}
+
 	for _, sizeStr := range strings.Split((*sizeFlag), ",") {
 		sizeNum, err := strconv.Atoi(sizeStr)
 		if err != nil {
 			fmt.Println("Invalid size provided, using default values")
-			return []int{1400, 1200, 800, 400}, outDir
+			sizes = []int{1400, 1200, 800, 400}
+			return sizes, outDir, inputDir
 		}
 		sizes = append(sizes, sizeNum)
 	}
 
 	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-	return sizes, outDir
+	return sizes, outDir, inputDir
 }
 
 func main() {
 	start := time.Now()
 
-	path, err := os.ReadDir("./")
+	sizes, outDir, inputDir := getArgs()
+	allFiles, err := os.ReadDir(inputDir)
 	if err != nil {
-		log.Println(err)
+		fmt.Fprintln(os.Stderr, err)
+		return
 	}
 
-	sizes, outDir := getArgs()
-
-	// get only files with image extensions
-	var files []os.DirEntry
-	for _, file := range path {
+	// get only imageFiles with image extensions
+	var imageFiles []os.DirEntry
+	for _, file := range allFiles {
 		fileName := file.Name()
 		fileExtension, _, err := getFileExtension(fileName)
 		if err != nil {
@@ -186,30 +210,16 @@ func main() {
 		if fileExtension != ".jpeg" && fileExtension != ".jpg" && fileExtension != ".png" && fileExtension != ".webp" {
 			continue
 		}
-		files = append(files, file)
+		imageFiles = append(imageFiles, file)
 	}
 
-	fmt.Println("Resizing " + fmt.Sprint(len(files)) + " images...")
+	fmt.Println("Resizing " + fmt.Sprint(len(imageFiles)) + " images in " + inputDir + " to " + fmt.Sprint(sizes) + " and saving to " + outDir + "...")
 
-	initWorkerPool(runtime.NumCPU(), len(files)*len(sizes))
+	initWorkerPool(runtime.NumCPU(), len(imageFiles)*len(sizes))
 
-	for _, file := range files {
+	for _, file := range imageFiles {
 		fileName := file.Name()
-		createTask(func() {
-			_, fileNameNoExt, err := getFileExtension(fileName)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return
-			}
-
-			buffer, err := bimg.Read(fileName)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				return
-			}
-
-			makeResizeImageTask(buffer, fileNameNoExt, sizes, tasks, outDir)
-		})
+		createTask(func() { makeResizeImageTask(fileName, sizes, outDir) })
 	}
 
 	syncWorkerPool()
