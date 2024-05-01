@@ -118,26 +118,25 @@ func parseInputDir(inputDirFlag *string) string {
 }
 
 // inputDir does not end with a slash
-func getArgs() (sizes []int, outDir string, inputDir string, recursive bool) {
-	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to\nex: size=100,200,300")
-	outDirFlag := flag.String("outDir", "", "output directory\nex: outDir=./output/")
-	inputDirFlag := flag.String("inputDir", "", "input directory\nex: inputDir=./images/")
-	recursiveFlag := flag.Bool("r", false, "recursively search for images in input directory")
+func getArgs() (file bool, filePath, outDir, inputDir string, sizes []int, recursive bool, container bool) {
+	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to\nex: size=100,200,300\n")
+	outDirFlag := flag.String("outDir", "", "output directory\nex: outDir=./output/\n")
+	inputDirFlag := flag.String("inputDir", "", "input directory\nex: inputDir=./images/\n")
+	fileFlag := flag.String("file", "", "file name\nwill override inputDir and recursive flags\nex: file=./images/image.jpg\n")
+	recursiveFlag := flag.Bool("r", false, "recursively search for images in input directory\n")
+	containerFlag := flag.Bool("c", false, "puts all resized images in folders of the same name as the original image\n")
 	flag.Parse()
 
-	outDir = parseInputDir(outDirFlag)
-	inputDir = parseInputDir(inputDirFlag)
-
-	if recursiveFlag == nil {
-		recursive = false
+	if containerFlag == nil {
+		container = false
 	} else {
-		recursive = *recursiveFlag
+		container = *containerFlag
 	}
 
 	if sizeFlag == nil || len(*sizeFlag) == 0 {
 		fmt.Println("No size flag provided, using default values")
 		sizes = []int{1400, 1200, 800, 400}
-		return sizes, outDir, inputDir, recursive
+		return file, filePath, outDir, inputDir, sizes, recursive, container
 	}
 
 	for _, sizeStr := range strings.Split((*sizeFlag), ",") {
@@ -145,13 +144,30 @@ func getArgs() (sizes []int, outDir string, inputDir string, recursive bool) {
 		if err != nil {
 			fmt.Println("Invalid size provided, using default values")
 			sizes = []int{1400, 1200, 800, 400}
-			return sizes, outDir, inputDir, recursive
+			return file, filePath, outDir, inputDir, sizes, recursive, container
 		}
 		sizes = append(sizes, sizeNum)
+		sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
 	}
 
-	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-	return sizes, outDir, inputDir, recursive
+	if fileFlag == nil || len(*fileFlag) == 0 {
+		file = false
+	} else {
+		file = true
+		filePath = *fileFlag
+		return file, filePath, outDir, inputDir, sizes, recursive, container
+	}
+
+	if recursiveFlag == nil {
+		recursive = false
+	} else {
+		recursive = *recursiveFlag
+	}
+
+	outDir = parseInputDir(outDirFlag)
+	inputDir = parseInputDir(inputDirFlag)
+
+	return file, filePath, outDir, inputDir, sizes, recursive, container
 }
 
 var exceptedExtensions = []string{".jpeg", ".jpg", ".png", ".webp"}
@@ -205,7 +221,6 @@ func makeResizeImageTask(filePath string, outDir string, fileName string, sizes 
 		return
 	}
 
-
 	// create full size webp image if the original image is not webp
 	outDir = fmt.Sprintf("%s/%s", outDir, fileName)
 	if !isWebp {
@@ -231,7 +246,7 @@ func makeResizeImageTask(filePath string, outDir string, fileName string, sizes 
 	}
 }
 
-func resizeInPath(currDir string, outDir string, sizes []int, recursive bool) {
+func resizeInPath(currDir string, outDir string, sizes []int, recursive bool, container bool) {
 	files, err := os.ReadDir(currDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -239,12 +254,13 @@ func resizeInPath(currDir string, outDir string, sizes []int, recursive bool) {
 	}
 
 	for _, file := range files {
-		fileDir := file.Name()
+		filePath := file.Name()
 		if recursive && file.Type().IsDir() {
-			resizeInPath(currDir+"/"+fileDir, outDir+"/"+fileDir, sizes, recursive)
+			resizeInPath(currDir+"/"+filePath, outDir+"/"+filePath, sizes, recursive, container)
+			continue
 		}
 
-		fileExtension, fileName, err := getFileExtension(fileDir)
+		fileExtension, fileName, err := getFileExtension(filePath)
 		if err != nil {
 			continue
 		}
@@ -262,11 +278,31 @@ func resizeInPath(currDir string, outDir string, sizes []int, recursive bool) {
 func main() {
 	start := time.Now()
 
-	sizes, outDir, inputDir, recursive := getArgs()
+	file, filePath, outDir, inputDir, sizes, recursive, container := getArgs()
+
+	if file {
+		fileExtension, fileName, err := getFileExtension(filePath)
+		if err != nil {
+			return
+		}
+
+		if !slices.Contains(exceptedExtensions, fileExtension) {
+			return
+		}
+
+		log.Printf("Resizing %s to %s and saving to %s %s\n", filePath, fmt.Sprint(sizes), outDir, fileName)
+
+		initWorkerPool(runtime.NumCPU())
+
+		makeResizeImageTask(filePath, outDir, fileName, sizes, fileExtension == ".webp")
+
+		syncWorkerPool()
+		return
+	}
 
 	initWorkerPool(runtime.NumCPU())
 
-	resizeInPath(inputDir, outDir, sizes, recursive)
+	resizeInPath(inputDir, outDir, sizes, recursive, container)
 
 	syncWorkerPool()
 
