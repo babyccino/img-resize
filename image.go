@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,41 +15,6 @@ import (
 
 	"github.com/h2non/bimg"
 )
-
-func getFileExtension(fileName string) (extension string, fileNameNoExt string, err error) {
-	lastPeriod := strings.LastIndex(fileName, ".")
-	if lastPeriod == -1 {
-		return "", "", fmt.Errorf("No extension found")
-	}
-	return fileName[lastPeriod:], fileName[:lastPeriod], nil
-}
-
-func resizeToWidth(img *bimg.Image, width int, outDir string, name string) {
-	fmt.Println("Resizing " + name + " to " + fmt.Sprint(width) + "w")
-	if img == nil {
-		fmt.Fprintln(os.Stderr, "newImage is nil")
-		return
-	}
-
-	size, err := img.Size()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-	}
-
-	height := (width * size.Height) / size.Width
-
-	buf, err := img.Resize(width, height)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-
-	err = bimg.Write(outDir+name+"/"+name+"?w="+fmt.Sprint(width)+".webp", buf)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-}
 
 func getStartingIndex(width int, sizes []int) int {
 	for i, size := range sizes {
@@ -75,10 +41,23 @@ func startWorker() {
 	}
 }
 
-func initWorkerPool(threadLimit int, taskBufferLength int) {
+func initWorkerPool(threadLimit int) {
 	wg = sync.WaitGroup{}
-	if (taskBufferLength) == 0 {
-		tasks = make(chan func())
+	tasks = make(chan func())
+
+	if threadLimit == 0 {
+		threadLimit = 4
+	}
+
+	for i := 0; i < threadLimit; i++ {
+		go startWorker()
+	}
+}
+
+func initWorkerPoolBuffer(threadLimit int, taskBufferLength int) {
+	wg = sync.WaitGroup{}
+	if (taskBufferLength) <= 0 {
+		panic("task buffer length must be greater than 0")
 	} else {
 		tasks = make(chan func(), taskBufferLength)
 	}
@@ -97,14 +76,116 @@ func syncWorkerPool() {
 	close(tasks)
 }
 
-func makeResizeImageTask(fileName string, sizes []int, outDir string) {
-	extension, fileNameNoExt, err := getFileExtension(fileName)
+func getFileExtension(fileName string) (extension string, fileNameNoExt string, err error) {
+	lastPeriod := strings.LastIndex(fileName, ".")
+	if lastPeriod == -1 {
+		return "", "", fmt.Errorf("No extension found")
+	}
+
+	lastSlash := strings.LastIndex(fileName, "/")
+	if lastSlash == -1 {
+		fileNameNoExt = fileName[:lastPeriod]
+	} else {
+		fileNameNoExt = fileName[lastSlash+1 : lastPeriod]
+	}
+
+	return fileName[lastPeriod:], fileNameNoExt, nil
+}
+
+func parseInputDir(inputDirFlag *string) string {
+	if inputDirFlag == nil || len(*inputDirFlag) == 0 {
+		return "."
+	}
+
+	inputDir := *inputDirFlag
+	if inputDir == "/" {
+		return ""
+	}
+	if inputDir == "." {
+		return "."
+	}
+	if inputDir == ".." {
+		return ".."
+	}
+
+	if inputDir[0] != '/' && inputDir[0] != '.' && inputDir[0] != '~' {
+		inputDir = "./" + inputDir
+	}
+	if inputDir[len(inputDir)-1] == '/' {
+		inputDir = inputDir[:len(inputDir)-1]
+	}
+	return inputDir
+}
+
+// inputDir does not end with a slash
+func getArgs() (sizes []int, outDir string, inputDir string, recursive bool) {
+	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to\nex: size=100,200,300")
+	outDirFlag := flag.String("outDir", "", "output directory\nex: outDir=./output/")
+	inputDirFlag := flag.String("inputDir", "", "input directory\nex: inputDir=./images/")
+	recursiveFlag := flag.Bool("r", false, "recursively search for images in input directory")
+	flag.Parse()
+
+	outDir = parseInputDir(outDirFlag)
+	inputDir = parseInputDir(inputDirFlag)
+
+	if recursiveFlag == nil {
+		recursive = false
+	} else {
+		recursive = *recursiveFlag
+	}
+
+	if sizeFlag == nil || len(*sizeFlag) == 0 {
+		fmt.Println("No size flag provided, using default values")
+		sizes = []int{1400, 1200, 800, 400}
+		return sizes, outDir, inputDir, recursive
+	}
+
+	for _, sizeStr := range strings.Split((*sizeFlag), ",") {
+		sizeNum, err := strconv.Atoi(sizeStr)
+		if err != nil {
+			fmt.Println("Invalid size provided, using default values")
+			sizes = []int{1400, 1200, 800, 400}
+			return sizes, outDir, inputDir, recursive
+		}
+		sizes = append(sizes, sizeNum)
+	}
+
+	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
+	return sizes, outDir, inputDir, recursive
+}
+
+var exceptedExtensions = []string{".jpeg", ".jpg", ".png", ".webp"}
+
+func resizeToWidth(img *bimg.Image, width int, outDir string, fileName string) {
+	log.Printf("Resizing %s to %d w", fileName, width)
+	if img == nil {
+		fmt.Fprintln(os.Stderr, "newImage is nil")
+		return
+	}
+
+	size, err := img.Size()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+	}
+
+	height := (width * size.Height) / size.Width
+
+	buf, err := img.Resize(width, height)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 
-	buffer, err := bimg.Read(fileName)
+	outPath := fmt.Sprintf("%s/%s?w=%d.webp", outDir, fileName, width)
+	err = bimg.Write(outPath, buf)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+}
+
+func makeResizeImageTask(filePath string, outDir string, fileName string, sizes []int, isWebp bool) {
+	buffer, err := bimg.Read(filePath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
@@ -118,15 +199,18 @@ func makeResizeImageTask(fileName string, sizes []int, outDir string) {
 
 	newImage := bimg.NewImage(newImageBuf)
 
-	dirErr := os.MkdirAll(outDir+fileNameNoExt, 0755)
+	dirErr := os.MkdirAll(outDir+"/"+fileName, 0755)
 	if dirErr != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 
+
 	// create full size webp image if the original image is not webp
-	if extension != ".webp" {
-		err = bimg.Write(outDir+fileNameNoExt+"/"+fileNameNoExt+".webp", newImageBuf)
+	outDir = fmt.Sprintf("%s/%s", outDir, fileName)
+	if !isWebp {
+		outFileName := fmt.Sprintf("%s.webp", outDir)
+		err = bimg.Write(outFileName, newImageBuf)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -140,100 +224,53 @@ func makeResizeImageTask(fileName string, sizes []int, outDir string) {
 	}
 
 	startingIndex := getStartingIndex(size.Width, sizes)
-	fmt.Println("Resizing " + fileNameNoExt + " to " + fmt.Sprint(sizes[startingIndex:]))
+	fmt.Println("Resizing " + fileName + " to " + fmt.Sprint(sizes[startingIndex:]))
 	for _, resizeWidth := range sizes[startingIndex:] {
 		resizeWidthCopy := resizeWidth
-		createTask(func() { resizeToWidth(newImage, resizeWidthCopy, outDir, fileNameNoExt) })
+		createTask(func() { resizeToWidth(newImage, resizeWidthCopy, outDir, fileName) })
 	}
 }
 
-func getArgs() (sizes []int, outDir string, inputDir string) {
-	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to")
-	outDirFlag := flag.String("outDir", "", "output directory")
-	inputDirFlag := flag.String("inputDir", "", "input directory")
-	flag.Parse()
-
-	if outDirFlag == nil || len(*outDirFlag) == 0 {
-		outDir = "./"
-	} else {
-		outDir = *outDirFlag
-		if outDir[0] != '/' && outDir[0] != '.' && outDir[0] != '~' {
-			outDir = "./" + outDir
-		}
-		if outDir[len(outDir)-1] != '/' {
-			outDir += "/"
-		}
-	}
-
-	if inputDirFlag == nil || len(*inputDirFlag) == 0 {
-		inputDir = "./"
-	} else {
-		inputDir = *inputDirFlag
-		if inputDir[0] != '/' && inputDir[0] != '.' && inputDir[0] != '~' {
-			inputDir = "./" + inputDir
-		}
-		if inputDir[len(inputDir)-1] != '/' {
-			inputDir += "/"
-		}
-	}
-
-	if sizeFlag == nil || len(*sizeFlag) == 0 {
-		fmt.Println("No size flag provided, using default values")
-		sizes = []int{1400, 1200, 800, 400}
-		return sizes, outDir, inputDir
-	}
-
-	for _, sizeStr := range strings.Split((*sizeFlag), ",") {
-		sizeNum, err := strconv.Atoi(sizeStr)
-		if err != nil {
-			fmt.Println("Invalid size provided, using default values")
-			sizes = []int{1400, 1200, 800, 400}
-			return sizes, outDir, inputDir
-		}
-		sizes = append(sizes, sizeNum)
-	}
-
-	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-	return sizes, outDir, inputDir
-}
-
-func main() {
-	start := time.Now()
-
-	sizes, outDir, inputDir := getArgs()
-	allFiles, err := os.ReadDir(inputDir)
+func resizeInPath(currDir string, outDir string, sizes []int, recursive bool) {
+	files, err := os.ReadDir(currDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 
-	// get only imageFiles with image extensions
-	var imageFiles []os.DirEntry
-	for _, file := range allFiles {
-		fileName := file.Name()
-		fileExtension, _, err := getFileExtension(fileName)
+	for _, file := range files {
+		fileDir := file.Name()
+		if recursive && file.Type().IsDir() {
+			resizeInPath(currDir+"/"+fileDir, outDir+"/"+fileDir, sizes, recursive)
+		}
+
+		fileExtension, fileName, err := getFileExtension(fileDir)
 		if err != nil {
 			continue
 		}
 
-		if fileExtension != ".jpeg" && fileExtension != ".jpg" && fileExtension != ".png" && fileExtension != ".webp" {
+		if !slices.Contains(exceptedExtensions, fileExtension) {
 			continue
 		}
-		imageFiles = append(imageFiles, file)
+
+		fullFilePath := currDir + "/" + file.Name()
+		log.Printf("Resizing %s to %s and saving to %s %s\n", fullFilePath, fmt.Sprint(sizes), outDir, fileName)
+		createTask(func() { makeResizeImageTask(fullFilePath, outDir, fileName, sizes, fileExtension == ".webp") })
 	}
+}
 
-	fmt.Println("Resizing " + fmt.Sprint(len(imageFiles)) + " images in " + inputDir + " to " + fmt.Sprint(sizes) + " and saving to " + outDir + "...")
+func main() {
+	start := time.Now()
 
-	initWorkerPool(runtime.NumCPU(), len(imageFiles)*len(sizes))
+	sizes, outDir, inputDir, recursive := getArgs()
 
-	for _, file := range imageFiles {
-		fileName := file.Name()
-		createTask(func() { makeResizeImageTask(fileName, sizes, outDir) })
-	}
+	initWorkerPool(runtime.NumCPU())
+
+	resizeInPath(inputDir, outDir, sizes, recursive)
 
 	syncWorkerPool()
 
 	elapsed := time.Since(start)
-	log.Printf("img-resize took %s", elapsed)
+	log.Printf("img-resize took %s\n", elapsed)
 	fmt.Println("Done!")
 }
