@@ -76,6 +76,8 @@ func syncWorkerPool() {
 	close(tasks)
 }
 
+var exceptedExtensions = []string{".jpeg", ".jpg", ".png", ".webp"}
+
 func getFileExtension(fileName string) (extension string, fileNameNoExt string, err error) {
 	lastPeriod := strings.LastIndex(fileName, ".")
 	if lastPeriod == -1 {
@@ -117,8 +119,18 @@ func parseInputDir(inputDirFlag *string) string {
 	return inputDir
 }
 
+type Args struct {
+	file      bool
+	filePath  string
+	outDir    string
+	inputDir  string
+	sizes     []int
+	recursive bool
+	container bool
+}
+
 // inputDir does not end with a slash
-func getArgs() (file bool, filePath, outDir, inputDir string, sizes []int, recursive bool, container bool) {
+func getArgs() Args {
 	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to\nex: size=100,200,300\n")
 	outDirFlag := flag.String("outDir", "", "output directory\nex: outDir=./output/\n")
 	inputDirFlag := flag.String("inputDir", "", "input directory\nex: inputDir=./images/\n")
@@ -127,69 +139,145 @@ func getArgs() (file bool, filePath, outDir, inputDir string, sizes []int, recur
 	containerFlag := flag.Bool("c", false, "puts all resized images in folders of the same name as the original image\n")
 	flag.Parse()
 
+	var container bool
 	if containerFlag == nil {
 		container = false
 	} else {
 		container = *containerFlag
 	}
 
+	var sizes []int
 	if sizeFlag == nil || len(*sizeFlag) == 0 {
-		fmt.Println("No size flag provided, using default values")
+		log.Println("No size flag provided, using default values")
 		sizes = []int{1400, 1200, 800, 400}
 	} else {
 		for _, sizeStr := range strings.Split((*sizeFlag), ",") {
 			sizeNum, err := strconv.Atoi(sizeStr)
 			if err != nil {
-				fmt.Println("Invalid size provided, using default values")
+				log.Println("There was an error parsing the sizes argument, using default values")
 				sizes = []int{1400, 1200, 800, 400}
-				return file, filePath, outDir, inputDir, sizes, recursive, container
+				break
 			}
 			sizes = append(sizes, sizeNum)
 			sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
 		}
 	}
 
-	outDir = parseInputDir(outDirFlag)
+	outDir := parseInputDir(outDirFlag)
 
+	var file bool
 	if fileFlag == nil || len(*fileFlag) == 0 {
 		file = false
 	} else {
 		file = true
-		filePath = *fileFlag
-		println(file, filePath)
-		return file, filePath, outDir, inputDir, sizes, recursive, container
+		filePath := *fileFlag
+		return Args{
+			file:      file,
+			filePath:  filePath,
+			outDir:    outDir,
+			inputDir:  "",
+			sizes:     sizes,
+			recursive: false,
+			container: container,
+		}
 	}
 
+	var recursive bool
 	if recursiveFlag == nil {
 		recursive = false
 	} else {
 		recursive = *recursiveFlag
 	}
 
-	inputDir = parseInputDir(inputDirFlag)
+	inputDir := parseInputDir(inputDirFlag)
 
-	return file, filePath, outDir, inputDir, sizes, recursive, container
+	return Args{
+		file:      file,
+		filePath:  "",
+		outDir:    outDir,
+		inputDir:  inputDir,
+		sizes:     sizes,
+		recursive: recursive,
+		container: container,
+	}
 }
 
-var exceptedExtensions = []string{".jpeg", ".jpg", ".png", ".webp"}
+type Resizer struct {
+	sizes             []int
+	img               *bimg.Image
+	outDir            string
+	fileName          string
+	originalExtension string
+	imgSize           bimg.ImageSize
+}
 
-func resizeToWidth(img *bimg.Image, width int, outDir string, fileName string) {
-	log.Printf("Resizing %s to %d w", fileName, width)
+func (self *Resizer) Init(fullFilePath string) error {
+	fileExtension, fileName, err := getFileExtension(fullFilePath)
+	if err != nil {
+		return err
+	}
 
-	size, err := img.Size()
+	if !slices.Contains(exceptedExtensions, fileExtension) {
+		return fmt.Errorf("Invalid file extension")
+	}
+	self.fileName = fileName
+	self.originalExtension = fileExtension
+
+	buffer, err := bimg.Read(fullFilePath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+
+	newImageBuf, err := bimg.NewImage(buffer).Convert(bimg.WEBP)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+
+	self.img = bimg.NewImage(newImageBuf)
+
+	size, err := self.img.Size()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+	self.imgSize = size
+
+	return nil
+}
+
+func (resizer *Resizer) CreateResizeTasks() {
+	if !(resizer.originalExtension == ".webp") {
+		createTask(func() { resizer.writeFullSize() })
+	}
+
+	startingIndex := getStartingIndex(resizer.imgSize.Width, resizer.sizes)
+	log.Printf("Resizing %s to %v", resizer.fileName, resizer.sizes[startingIndex:])
+	for _, resizeWidth := range resizer.sizes[startingIndex:] {
+		// not needed after as of 1.22
+		resizeWidthCopy := resizeWidth
+		createTask(func() { resizer.ResizeToWidth(resizeWidthCopy) })
+	}
+}
+
+func (self *Resizer) ResizeToWidth(width int) {
+	log.Printf("Resizing %s to %d w", self.fileName, width)
+
+	size, err := self.img.Size()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
 
 	height := (width * size.Height) / size.Width
 
-	buf, err := img.Resize(width, height)
+	buf, err := self.img.Resize(width, height)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
 
-	outPath := fmt.Sprintf("%s/%s?w=%d.webp", outDir, fileName, width)
+	outPath := fmt.Sprintf("%s/%s?w=%d.webp", self.outDir, self.fileName, width)
 	err = bimg.Write(outPath, buf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -197,56 +285,26 @@ func resizeToWidth(img *bimg.Image, width int, outDir string, fileName string) {
 	}
 }
 
-func makeResizeImageTask(filePath string, outDir string, fileName string, sizes []int, isWebp bool, container bool) {
-	buffer, err := bimg.Read(filePath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+func (resizer *Resizer) Containerise() {
+	resizer.outDir = fmt.Sprintf("%s/%s", resizer.outDir, resizer.fileName)
+	dirErr := os.MkdirAll(resizer.outDir, 0755)
+	if dirErr != nil {
+		fmt.Fprintln(os.Stderr, dirErr)
 		return
-	}
-
-	newImageBuf, err := bimg.NewImage(buffer).Convert(bimg.WEBP)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-
-	newImage := bimg.NewImage(newImageBuf)
-
-	if container {
-		outDir = fmt.Sprintf("%s/%s", outDir, fileName)
-		dirErr := os.MkdirAll(outDir, 0755)
-		if dirErr != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
-	}
-
-	size, err := newImage.Size()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
-
-	startingIndex := getStartingIndex(size.Width, sizes)
-	fmt.Println("Resizing " + fileName + " to " + fmt.Sprint(sizes[startingIndex:]))
-	for _, resizeWidth := range sizes[startingIndex:] {
-		// needed before go 1.22
-		resizeWidthCopy := resizeWidth
-		createTask(func() { resizeToWidth(newImage, resizeWidthCopy, outDir, fileName) })
-	}
-
-	// create full size webp image if the original image is not webp
-	if !isWebp {
-		outFileName := fmt.Sprintf("%s.webp", outDir)
-		err = bimg.Write(outFileName, newImageBuf)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return
-		}
 	}
 }
 
-func resizeInPath(currDir string, outDir string, sizes []int, recursive bool, container bool) {
+func (resizer *Resizer) writeFullSize() error {
+	outFileName := fmt.Sprintf("%s/%s.webp", resizer.fileName, resizer.outDir)
+	err := bimg.Write(outFileName, resizer.img.Image())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return err
+	}
+	return nil
+}
+
+func resizeAllInPath(currDir string, outDir string, sizes []int, recursive bool, container bool) {
 	files, err := os.ReadDir(currDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -256,23 +314,24 @@ func resizeInPath(currDir string, outDir string, sizes []int, recursive bool, co
 	for _, file := range files {
 		filePath := file.Name()
 		if recursive && file.Type().IsDir() {
-			resizeInPath(currDir+"/"+filePath, outDir+"/"+filePath, sizes, recursive, container)
-			continue
-		}
-
-		fileExtension, fileName, err := getFileExtension(filePath)
-		if err != nil {
-			continue
-		}
-
-		if !slices.Contains(exceptedExtensions, fileExtension) {
+			resizeAllInPath(currDir+"/"+filePath, outDir+"/"+filePath, sizes, recursive, container)
 			continue
 		}
 
 		fullFilePath := currDir + "/" + file.Name()
-		log.Printf("Resizing %s to %s and saving to %s %s\n", fullFilePath, fmt.Sprint(sizes), outDir, fileName)
+		log.Printf("Resizing %s to %s and saving to %s\n", fullFilePath, fmt.Sprint(sizes), outDir)
 		createTask(func() {
-			makeResizeImageTask(fullFilePath, outDir, fileName, sizes, fileExtension == ".webp", container)
+			resizer := Resizer{
+				sizes:  sizes,
+				outDir: outDir,
+			}
+
+			resizer.Init(fullFilePath)
+			if container {
+				resizer.Containerise()
+			}
+			// create full size webp image if the original image is not webp
+			resizer.CreateResizeTasks()
 		})
 	}
 }
@@ -280,35 +339,25 @@ func resizeInPath(currDir string, outDir string, sizes []int, recursive bool, co
 func main() {
 	start := time.Now()
 
-	file, filePath, outDir, inputDir, sizes, recursive, container := getArgs()
-
-	if file {
-		fileExtension, fileName, err := getFileExtension(filePath)
-		if err != nil {
-			return
-		}
-
-		if !slices.Contains(exceptedExtensions, fileExtension) {
-			return
-		}
-
-		if container {
-			log.Printf("Resizing single file %s to %s and saving to %s/%s\n", filePath, fmt.Sprint(sizes), outDir, fileName)
-		} else {
-			log.Printf("Resizing single file %s to %s and saving to %s\n", filePath, fmt.Sprint(sizes), outDir)
-		}
-
-		initWorkerPool(runtime.NumCPU())
-
-		makeResizeImageTask(filePath, outDir, fileName, sizes, fileExtension == ".webp", container)
-
-		syncWorkerPool()
-		return
-	}
+	args := getArgs()
 
 	initWorkerPool(runtime.NumCPU())
 
-	resizeInPath(inputDir, outDir, sizes, recursive, container)
+	if args.file {
+		resizer := Resizer{
+			sizes:  args.sizes,
+			outDir: args.outDir,
+		}
+
+		resizer.Init(args.filePath)
+		if args.container {
+			resizer.Containerise()
+		}
+		// create full size webp image if the original image is not webp
+		resizer.CreateResizeTasks()
+	} else {
+		resizeAllInPath(args.inputDir, args.outDir, args.sizes, args.recursive, args.container)
+	}
 
 	syncWorkerPool()
 
