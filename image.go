@@ -5,14 +5,12 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/h2non/bimg"
 	flag "github.com/spf13/pflag"
 )
 
@@ -120,6 +118,7 @@ func parseInputDir(inputDirFlag *string) string {
 }
 
 type Program struct {
+	format     string
 	singleFile bool
 	outDir     string
 	inputDir   string
@@ -131,10 +130,19 @@ type Program struct {
 
 // inputDir does not end with a slash
 func InitProgram() Program {
+	const formatHelper = `
+  the format file names will be saved in
+  use '{f}' the name of the file and '{s}' for the file size
+  all files will end in .webp
+  defaults to '{s}w:{f}.webp'
+  ex: --format={s}w:{f} => 400w:image.webp
+  ex: --format={f}?width={s}w => image?width=400w.webp
+  `
 	sizeFlag := flag.StringP("size", "s", "", "comma separated list of sizes to resize to\nex: size=100,200,300\n")
+	formatFlag := flag.StringP("format", "f", "", formatHelper)
 	outDirFlag := flag.StringP("outDir", "o", "", "output directory\nex: outDir=./output/\n")
 	inputDirFlag := flag.StringP("inputDir", "i", "", "input directory\nex: inputDir=./images/\n")
-	fileFlag := flag.StringP("file", "f", "", "file name\nwill override inputDir and recursive flags\nex: file=./images/image.jpg\n")
+	fileFlag := flag.StringP("singleFile", "F", "", "file name\nwill override inputDir and recursive flags\nex: file=./images/image.jpg\n")
 	recursiveFlag := flag.BoolP("recursive", "r", false, "recursively search for images in input directory\n")
 	containerFlag := flag.BoolP("container", "c", false, "puts all resized images in folders of the same name as the original image\n")
 	flag.Parse()
@@ -144,6 +152,13 @@ func InitProgram() Program {
 		container = false
 	} else {
 		container = *containerFlag
+	}
+
+	var format string
+	if formatFlag == nil || len(*formatFlag) == 0 {
+		format = "{s}w:{f}.webp"
+	} else {
+		format = *formatFlag + ".webp"
 	}
 
 	var sizes []int
@@ -172,6 +187,7 @@ func InitProgram() Program {
 		file = true
 		filePath := *fileFlag
 		return Program{
+			format:     format,
 			singleFile: file,
 			inputDir:   filePath,
 			outDir:     outDir,
@@ -192,6 +208,7 @@ func InitProgram() Program {
 	inputDir := parseInputDir(inputDirFlag)
 
 	return Program{
+		format:     format,
 		singleFile: file,
 		outDir:     outDir,
 		inputDir:   inputDir,
@@ -213,21 +230,16 @@ func (program *Program) ResizeFile(fileName string, subDir *string) error {
 		fullFilePath = program.inputDir + "/" + *subDir + "/" + fileName
 	}
 
-	resizer := Resizer{
-		sizes:  program.sizes,
-		outDir: outDir,
-		errC:   program.errC,
-	}
-
-	err := resizer.Init(fullFilePath)
+	resizer, err := NewResizer(
+		program.sizes,
+		outDir,
+		program.errC,
+		program.format,
+		fullFilePath,
+		program.container,
+	)
 	if err != nil {
 		return err
-	}
-	if program.container {
-		err := resizer.Containerise()
-		if err != nil {
-			return err
-		}
 	}
 	// create full size webp image if the original image is not webp
 	resizer.CreateResizeTasks()
@@ -268,23 +280,19 @@ func (program *Program) resizeAllInPath(subDir *string) error {
 	return nil
 }
 
-func (program *Program) Work() error {
+func (program *Program) Run() error {
 	if program.singleFile {
-		resizer := Resizer{
-			sizes:  program.sizes,
-			outDir: program.outDir,
-			errC:   program.errC,
-		}
+		resizer, err := NewResizer(
+			program.sizes,
+			program.outDir,
+			program.errC,
+			program.format,
+			program.inputDir,
+			program.container,
+		)
 
-		err := resizer.Init(program.inputDir)
 		if err != nil {
 			return err
-		}
-		if program.container {
-			err := resizer.Containerise()
-			if err != nil {
-				return err
-			}
 		}
 		// create full size webp image if the original image is not webp
 		resizer.CreateResizeTasks()
@@ -301,115 +309,6 @@ func (program *Program) Shutdown() {
 	close(program.errC)
 }
 
-type Resizer struct {
-	sizes             []int
-	img               *bimg.Image
-	outDir            string
-	fileName          string
-	originalExtension string
-	imgSize           bimg.ImageSize
-
-	errC chan error
-}
-
-func (resizer *Resizer) Init(fullFilePath string) error {
-	fileExtension, fileName, err := getFileExtension(fullFilePath)
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-
-	if !slices.Contains(exceptedExtensions, fileExtension) {
-		err := fmt.Errorf("Invalid file extension")
-		resizer.errC <- err
-		return err
-	}
-	resizer.fileName = fileName
-	resizer.originalExtension = fileExtension
-
-	buffer, err := bimg.Read(fullFilePath)
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-
-	newImageBuf, err := bimg.NewImage(buffer).Convert(bimg.WEBP)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return err
-	}
-
-	resizer.img = bimg.NewImage(newImageBuf)
-
-	size, err := resizer.img.Size()
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-	resizer.imgSize = size
-	return nil
-}
-
-func (resizer *Resizer) CreateResizeTasks() {
-	if !(resizer.originalExtension == ".webp") {
-		createTask(func() { resizer.writeFullSize() })
-	}
-
-	startingIndex := getStartingIndex(resizer.imgSize.Width, resizer.sizes)
-	log.Printf("Resizing %s to %v", resizer.fileName, resizer.sizes[startingIndex:])
-	for _, resizeWidth := range resizer.sizes[startingIndex:] {
-		// not needed after as of 1.22
-		resizeWidthCopy := resizeWidth
-		createTask(func() { resizer.ResizeToWidth(resizeWidthCopy) })
-	}
-}
-
-func (resizer *Resizer) ResizeToWidth(width int) error {
-	log.Printf("Resizing %s to %d w", resizer.fileName, width)
-
-	size, err := resizer.img.Size()
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-
-	height := (width * size.Height) / size.Width
-
-	buf, err := resizer.img.Resize(width, height)
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-
-	outPath := fmt.Sprintf("%s/%s?w=%d.webp", resizer.outDir, resizer.fileName, width)
-	err = bimg.Write(outPath, buf)
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-	return nil
-}
-
-func (resizer *Resizer) Containerise() error {
-	resizer.outDir = fmt.Sprintf("%s/%s", resizer.outDir, resizer.fileName)
-	err := os.MkdirAll(resizer.outDir, 0755)
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-	return nil
-}
-
-func (resizer *Resizer) writeFullSize() error {
-	outFileName := fmt.Sprintf("%s/%s.webp", resizer.fileName, resizer.outDir)
-	err := bimg.Write(outFileName, resizer.img.Image())
-	if err != nil {
-		resizer.errC <- err
-		return err
-	}
-	return nil
-}
-
 func main() {
 	start := time.Now()
 
@@ -421,7 +320,7 @@ func main() {
 		}
 	}()
 	initWorkerPool(runtime.NumCPU())
-	program.Work()
+	program.Run()
 	syncWorkerPool()
 	program.Shutdown()
 
