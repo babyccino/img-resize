@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/h2non/bimg"
+	flag "github.com/spf13/pflag"
 )
 
 func getStartingIndex(width int, sizes []int) int {
@@ -130,13 +130,13 @@ type Program struct {
 }
 
 // inputDir does not end with a slash
-	sizeFlag := flag.String("size", "", "comma separated list of sizes to resize to\nex: size=100,200,300\n")
-	outDirFlag := flag.String("outDir", "", "output directory\nex: outDir=./output/\n")
-	inputDirFlag := flag.String("inputDir", "", "input directory\nex: inputDir=./images/\n")
-	fileFlag := flag.String("file", "", "file name\nwill override inputDir and recursive flags\nex: file=./images/image.jpg\n")
-	recursiveFlag := flag.Bool("r", false, "recursively search for images in input directory\n")
-	containerFlag := flag.Bool("c", false, "puts all resized images in folders of the same name as the original image\n")
 func InitProgram() Program {
+	sizeFlag := flag.StringP("size", "s", "", "comma separated list of sizes to resize to\nex: size=100,200,300\n")
+	outDirFlag := flag.StringP("outDir", "o", "", "output directory\nex: outDir=./output/\n")
+	inputDirFlag := flag.StringP("inputDir", "i", "", "input directory\nex: inputDir=./images/\n")
+	fileFlag := flag.StringP("file", "f", "", "file name\nwill override inputDir and recursive flags\nex: file=./images/image.jpg\n")
+	recursiveFlag := flag.BoolP("recursive", "r", false, "recursively search for images in input directory\n")
+	containerFlag := flag.BoolP("container", "c", false, "puts all resized images in folders of the same name as the original image\n")
 	flag.Parse()
 
 	var container bool
